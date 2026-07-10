@@ -1,0 +1,39 @@
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: mini-bfcm-kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft mode: this broker also acts as the controller (fine for local dev,
+      # a real cluster would usually separate these roles across nodes).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Two listeners: one for other containers on the Docker network (PLAINTEXT),
+      # one for clients on the host machine (PLAINTEXT_HOST), since "kafka:29092"
+      # only resolves inside Docker but "localhost:9092" is what our host-side
+      # Python code will use later. PLAINTEXT and CONTROLLER bind to the
+      # container's own hostname rather than 0.0.0.0: Kafka refuses to
+      # advertise 0.0.0.0 to other nodes since it isn't a routable address.
+      # PLAINTEXT_HOST binds to 0.0.0.0 because that's the listener meant to
+      # accept connections arriving from outside the container (the host).
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # Single-broker local setup: replication factor of 1 everywhere.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+volumes:
+  kafka-data:
