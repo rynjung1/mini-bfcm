@@ -1,16 +1,15 @@
 # Mini BFCM
 
-A local streaming data pipeline that simulates a Shopify-style flash sale
-traffic spike and shows the effect live on a dashboard: synthetic orders
-flow through real, self-hosted Apache Kafka into windowed DuckDB
-aggregates, with consumer lag tracked the whole way so you can watch the
-pipeline either keep up or fall behind under load.
+A local streaming data pipeline that simulates a flash sale traffic
+spike on an e-commerce order stream and shows the effect live on a
+dashboard: synthetic orders flow through real, self-hosted Apache Kafka
+into windowed DuckDB aggregates, with consumer lag tracked the whole way
+so you can watch the pipeline either keep up or fall behind under load.
 
-Inspired by Shopify's own BFCM engineering practices: they run bimonthly
-fire drills simulating 150% of the prior year's peak load, and their
-public "Live Globe" dashboard is powered by real-time streaming
-pipelines. This is a small scale version of that same idea, built as a
-portfolio project.
+Most portfolio ETL projects show a steady-rate pipeline. This one
+demonstrates a harder, more realistic problem: what happens to a
+pipeline under a sudden load spike, and how do you observe and reason
+about that instead of it silently falling over.
 
 ## Architecture
 
@@ -64,7 +63,7 @@ public URL on demand.
 
 ## Components
 
-- **Producer** (`producer/`): generates synthetic Shopify shaped order
+- **Producer** (`producer/`): generates synthetic e-commerce order
   events at a configurable baseline rate, with an optional spike mode
   for simulating a flash sale surge.
 - **Broker**: real Apache Kafka, self hosted via Docker Compose, running
