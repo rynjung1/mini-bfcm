@@ -1,3 +1,17 @@
+"""
+Order Generator
+
+Builds one synthetic Shopify-shaped order: a customer drawn from a
+fixed pool, 1-4 random line items from a small product catalog, and a
+total computed from those line items.
+
+customer_id comes from a fixed pool of 2000 ids rather than a fresh id
+per order, so the same customer can plausibly place more than one
+order. That's what makes "unique customers per window" (computed
+downstream in the consumer) a meaningful metric instead of trivially
+equal to order count.
+"""
+
 import random
 import time
 import uuid

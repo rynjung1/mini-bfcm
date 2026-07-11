@@ -52,7 +52,7 @@ of that same idea.
 ## Architecture
 
 ```
-Producer (synthetic orders) --normal rate--> Apache Kafka topic (self-hosted)
+Producer (synthetic orders) --normal rate--> Apache Kafka topic (self-hosted, local Docker)
                               --spike mode (50-100x)-->
                                      |
                                      v
@@ -60,11 +60,18 @@ Producer (synthetic orders) --normal rate--> Apache Kafka topic (self-hosted)
                           idempotent upserts, lag tracking)
                                      |
                                      v
-                          DuckDB / MotherDuck (shared store)
+                              DuckDB (local file)
                                      |
                                      v
-                          Streamlit dashboard (live, public)
+                     Streamlit dashboard (local; tunneled to a
+                     public URL on demand via ngrok/Cloudflare Tunnel)
 ```
+
+Everything (Kafka, producer, consumer, DuckDB, dashboard) runs on one
+machine, all the time, exactly as in local dev. There is no cloud
+deployment of the pipeline itself. For demos (interviews, recruiters
+clicking the GitHub link), the dashboard's local port is exposed
+publicly through a tunnel, started only when needed.
 
 ### Components
 
@@ -75,25 +82,32 @@ Producer (synthetic orders) --normal rate--> Apache Kafka topic (self-hosted)
 - **Broker**: real Apache Kafka, self-hosted, not a Kafka-compatible
   substitute. Runs in **KRaft mode** (Kafka's modern mode that removes
   the old Zookeeper dependency, so a single Kafka container is enough for
-  local dev, no separate coordination service to run). Locally via Docker
-  Compose; once deployed, the same Kafka setup runs on a free-tier cloud
-  VM (Oracle Cloud's "Always Free" tier) instead of a managed service.
-  Chosen deliberately over Redpanda/Confluent Cloud/Upstash: "Apache
-  Kafka" is the name recruiters and interviewers actually recognize, and
-  self-hosting means genuinely $0 cost with no card on file and no risk
-  of a surprise bill after a trial period ends.
+  local dev, no separate coordination service to run), via Docker
+  Compose. Runs locally only, no cloud VM. A free-tier cloud VM (e.g.
+  Oracle Cloud "Always Free") was considered and deliberately rejected:
+  there are enough real reports of people getting billed unexpectedly on
+  Oracle's free tier that the risk isn't worth it for a portfolio
+  project. Chosen deliberately over Redpanda/Confluent Cloud/Upstash
+  regardless: "Apache Kafka" is the name recruiters and interviewers
+  actually recognize, and self-hosting locally means genuinely $0 cost
+  with no card on file anywhere.
 - **Consumer**: reads the order stream, computes 10-second tumbling
   windows (order count, revenue, unique customers), and tracks consumer
   lag (how far behind the consumer is from the latest produced message).
   Idempotent by design: aggregates are upserted keyed by `window_start`,
   so replaying a window after a consumer restart doesn't double-count.
-- **Storage**: DuckDB locally (all components on one machine). MotherDuck
-  (hosted DuckDB, free tier) once producer/consumer/dashboard are deployed
-  as separate services and need a shared, network-accessible DB.
+- **Storage**: DuckDB, a single local file. All components run on one
+  machine, so there's no need for a hosted/shared DB like MotherDuck,
+  that would only matter if producer/consumer/dashboard were split
+  across separate deployed services, which they aren't.
 - **Dashboard**: Streamlit, polls the DB every ~2s, shows orders/min and
   revenue/min as live charts, plus a lag indicator, the number that
   should visibly climb during the spike and recover afterward. This is
-  the actual "does this pipeline keep up under load" story.
+  the actual "does this pipeline keep up under load" story. For a public
+  demo URL, expose it with `ngrok` or `cloudflared` (Cloudflare Tunnel),
+  neither requires a card on file. The link only works while the local
+  pipeline is running, that's an accepted tradeoff, see the concepts
+  section below.
 
 ## Concepts Ryan needs to be able to explain in an interview
 
@@ -122,23 +136,30 @@ it:
    metadata internally. This is also a genuinely current fact worth
    knowing, not just a cost-saving hack, KRaft is now the direction the
    whole Kafka project has moved.
+7. **Why local + tunnel instead of a real cloud deployment.** The
+   tradeoff: a free-tier cloud VM would give an always-on public URL,
+   but real users have reported unexpected billing on Oracle's "Always
+   Free" tier even without upgrading, an unacceptable risk for a project
+   with $0 budget. Running locally and tunneling (ngrok/Cloudflare
+   Tunnel) on demand gives a genuine public URL with zero billing
+   surface, at the cost of the link only being live while Ryan's machine
+   is running the pipeline. For a portfolio project demoed live in
+   interviews (not something needing 24/7 uptime for strangers), that's
+   the right tradeoff, uptime isn't the thing being evaluated, the
+   pipeline's behavior under load is.
 
 ## Tech stack
 
 - Python 3.11+
 - `confluent-kafka` (Kafka client library, the name refers to the client,
   not the hosting, works against any real Kafka broker)
-- **Apache Kafka in KRaft mode** (local: Docker Compose; deployed: same
-  Kafka image self-hosted on an Oracle Cloud "Always Free" tier VM) —
-  no Redpanda, no Confluent Cloud, no Upstash. Real Kafka end to end,
-  self-hosted, $0 cost, no card required.
-- DuckDB (local) / MotherDuck (deployed, shared access)
+- **Apache Kafka in KRaft mode**, local only, via Docker Compose — no
+  Redpanda, no Confluent Cloud, no Upstash, no cloud VM. Real Kafka end
+  to end, self-hosted, $0 cost, no card required anywhere.
+- DuckDB (single local file, all components on one machine)
 - Streamlit + Plotly (dashboard)
-- Render free tier (producer + consumer background workers) — reconfirm
-  this is still the right call once the Kafka broker lives on its own VM;
-  producer/consumer may end up on that same VM instead, simpler than
-  coordinating three different free tiers
-- Streamlit Community Cloud (public dashboard URL)
+- `ngrok` or `cloudflared` (Cloudflare Tunnel) to expose the local
+  Streamlit dashboard with a public URL on demand, for demos
 
 ## Current status
 
@@ -166,9 +187,9 @@ built, see Working Style above.
    windowing, then add idempotent DuckDB upserts, then add lag tracking,
    as separate incremental steps, explain each addition before writing it.
 5. Build the dashboard against the local DuckDB file.
-6. Only after all of the above works locally: tackle deployment (Oracle
-   Cloud free-tier VM for Kafka + producer/consumer, MotherDuck,
-   Streamlit Cloud).
+6. Set up `ngrok` or `cloudflared` to tunnel the local Streamlit
+   dashboard to a public URL on demand, for demos. No cloud deployment
+   of Kafka, the producer, or the consumer, they stay local permanently.
 
 Even though Claude Code is writing the code (vibe-coded), keep moving
 through these steps one at a time rather than generating everything at

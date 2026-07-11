@@ -1,3 +1,27 @@
+"""
+DuckDB Storage Layer
+
+Owns the schema and the idempotent upsert logic that turns a stream of
+individual (possibly redelivered) orders into windowed aggregates.
+
+How idempotency works:
+Kafka's default delivery guarantee is at-least-once, so the same
+message can be redelivered (e.g. a consumer restart between processing
+a message and committing its offset). processed_orders has order_id as
+its PRIMARY KEY, so re-inserting an already-seen order_id is a no-op
+(ON CONFLICT DO NOTHING), and the RETURNING clause coming back empty is
+exactly how a duplicate is detected -- window_stats and
+window_customers are simply never touched for it. That makes replaying
+a window safe: aggregates reflect each order_id exactly once no matter
+how many times it's redelivered.
+
+DuckDB only allows one process to hold the database file at a time,
+even for reads, so connections here are deliberately short-lived: open,
+do one batch's worth of work in a single transaction, close. That's
+what leaves the dashboard's read-only connection room to get in
+between flushes.
+"""
+
 from pathlib import Path
 
 import duckdb
@@ -61,12 +85,15 @@ def _apply_order(conn: duckdb.DuckDBPyConnection, order: dict, window_start: int
     Returns the window's updated stats, or None if `order_id` was already
     processed before (a Kafka redelivery), in which case nothing changed.
     """
-    try:
-        conn.execute(
-            "INSERT INTO processed_orders (order_id, window_start) VALUES (?, ?)",
-            [order["order_id"], window_start],
-        )
-    except duckdb.ConstraintException:
+    inserted = conn.execute(
+        """
+        INSERT INTO processed_orders (order_id, window_start) VALUES (?, ?)
+        ON CONFLICT (order_id) DO NOTHING
+        RETURNING order_id
+        """,
+        [order["order_id"], window_start],
+    ).fetchone()
+    if inserted is None:
         return None
 
     conn.execute(

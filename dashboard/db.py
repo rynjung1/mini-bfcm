@@ -1,3 +1,17 @@
+"""
+Dashboard Read Layer
+
+Read-only queries against the same DuckDB file the consumer writes to.
+
+How the retry works:
+DuckDB only allows one process to hold the database file at a time,
+even for reads. If the consumer happens to be mid-flush when the
+dashboard polls, the connection attempt raises duckdb.IOException.
+read_query() retries with a short backoff instead of surfacing that as
+an error -- flushes are brief (see consumer/store.py), so a retry
+almost always succeeds within a couple of attempts.
+"""
+
 import time
 from pathlib import Path
 

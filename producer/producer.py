@@ -1,3 +1,27 @@
+"""
+Mini BFCM Order Producer
+
+Publishes synthetic Shopify-shaped order events to a Kafka topic at a
+configurable baseline rate, with an optional flash-sale spike mode.
+
+How spike mode works (ramp -> hold -> decay):
+1. Baseline: orders are produced at a steady rate (--rate, orders/sec).
+2. Ramp: over --spike-ramp seconds, the rate climbs linearly from
+   baseline to baseline * --spike-multiplier (e.g. 75x), modeling a
+   flash sale suddenly going live.
+3. Hold: the rate stays pinned at the peak for --spike-hold seconds,
+   the busiest part of the sale.
+4. Decay: over --spike-decay seconds, the rate falls back linearly to
+   baseline, modeling the sale tailing off.
+
+Each loop iteration asks the SpikeProfile what the target rate is right
+now (profile.rate_at(elapsed)), generates one order, hands it to Kafka
+asynchronously (producer.produce + poll(0) to service delivery
+callbacks without blocking), then sleeps 1/rate seconds -- so
+throughput tracks the ramp/hold/decay curve without a separate
+scheduler.
+"""
+
 import argparse
 import json
 import time

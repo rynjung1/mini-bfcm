@@ -1,3 +1,16 @@
+# Mini BFCM — Local Kafka Broker
+#
+# Runs a single Apache Kafka broker in KRaft mode (Kafka Raft) for local
+# dev: no separate Zookeeper container, because in KRaft mode Kafka
+# manages its own cluster metadata internally instead of delegating
+# coordination to an external service. That's what makes one container
+# enough here, historically Kafka needed Zookeeper alongside it.
+#
+# This is real, self-hosted Apache Kafka (not a Kafka-compatible
+# substitute), chosen specifically because "Apache Kafka" is the name
+# recruiters/interviewers recognize, and running it locally via Docker
+# Compose means genuinely $0 cost with no cloud account or card on file
+# anywhere.
 services:
   kafka:
     image: apache/kafka:3.9.0

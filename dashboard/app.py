@@ -1,3 +1,24 @@
+"""
+Mini BFCM Live Dashboard
+
+Streamlit app that polls the DuckDB aggregate tables every 2 seconds
+and renders orders/min, revenue/min, and consumer lag as live charts --
+the public-facing view of "is the pipeline keeping up with the spike."
+
+Why this only ever reads a handful of aggregated rows, not raw events:
+window_stats has one row per 10-second window, so the query cost stays
+flat regardless of how many individual orders were produced in that
+window, even during a 100x spike. That's the payoff of doing the
+aggregation work in the consumer (see consumer/store.py) instead of
+here -- the dashboard would fall over trying to read raw events at
+spike volume if it had to do that aggregation itself on every poll.
+
+LAG_HEALTHY / LAG_ELEVATED are calibrated to this project's demo scale
+(a spike here peaks around a few hundred messages of backlog), not a
+universal constant -- a production system would size these to its own
+expected backlog under load.
+"""
+
 import time
 
 import pandas as pd

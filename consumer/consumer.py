@@ -1,3 +1,34 @@
+"""
+Mini BFCM Order Consumer
+
+Reads order events off the Kafka topic, folds them into 10-second
+tumbling window aggregates in DuckDB, and tracks consumer lag -- how
+far behind the consumer is from the latest message Kafka has for each
+partition.
+
+How one iteration of the poll loop works:
+1. Poll Kafka for the next message (0.2s timeout). If one arrives,
+   parse it, work out which 10s window it belongs to
+   (window_start_for), and append it to an in-memory buffer -- nothing
+   touches the database yet.
+2. Once FLUSH_INTERVAL_SECONDS has elapsed, flush(): open a DuckDB
+   connection, upsert the whole buffered batch in a single transaction
+   (idempotent by order_id -- see store.py), record the current
+   per-partition lag, then close the connection.
+3. Commit Kafka offsets only for the messages that just made it into
+   that batch, and only after the DuckDB write succeeded. Then repeat.
+
+Offsets are committed manually (enable.auto.commit=False) rather than
+on Kafka's own timer, because auto-commit can mark a message "done"
+before this consumer has actually durably written it -- a crash
+between those two points would silently lose that message instead of
+it being redelivered.
+
+Flushing happens even when the buffer is empty, so the lag time series
+stays continuous (e.g. sitting at 0 while idle) instead of having gaps
+whenever there's no traffic.
+"""
+
 import argparse
 import json
 import time

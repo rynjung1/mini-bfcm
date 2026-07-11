@@ -1,3 +1,13 @@
+"""
+Spike Profile
+
+Defines the shape of a flash-sale traffic spike as a piecewise function
+of elapsed time: baseline -> linear ramp -> hold at peak -> linear
+decay -> back to baseline. producer.py calls rate_at(elapsed) on every
+loop iteration to get the target orders/sec at that instant, and
+phase_at() purely to label the current phase for status logging.
+"""
+
 from dataclasses import dataclass
 
 
