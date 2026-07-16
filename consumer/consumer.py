@@ -33,12 +33,22 @@ import argparse
 import json
 import time
 
-from confluent_kafka import Consumer, TopicPartition
+import duckdb
+from confluent_kafka import Consumer, KafkaException, TopicPartition
 
 import store
 from windowing import window_start_for
 
 FLUSH_INTERVAL_SECONDS = 1.0
+# How often to sweep old dedup records out of processed_orders, and how far
+# back a redelivery could plausibly still land -- see store.prune_processed_orders.
+PRUNE_INTERVAL_SECONDS = 300.0
+DEDUP_RETENTION_SECONDS = 3600.0
+# consumer_lag is pure observability telemetry (recorded every flush,
+# forever), not aggregate output worth keeping indefinitely like
+# window_stats. Pruned on the same timer as the dedup table so the
+# dashboard's read query doesn't get slower every day the pipeline stays up.
+LAG_RETENTION_SECONDS = 86400.0
 
 
 def make_consumer(bootstrap_servers: str, group_id: str, from_beginning: bool) -> Consumer:
@@ -74,24 +84,37 @@ def measure_lag(consumer: Consumer) -> dict[int, int]:
     return lags
 
 
-def flush(db_path, buffer: list, consumer: Consumer) -> None:
+def flush(
+    db_path,
+    buffer: list,
+    consumer: Consumer,
+    prune_before_window_start: int | None = None,
+    lag_prune_before: float | None = None,
+) -> None:
     """Open a short-lived DuckDB connection, write the buffered batch and the
     current lag reading, then close it.
 
     DuckDB only allows one process to hold the database file at a time, even
     for reads (see store.py / concurrency notes) -- so the consumer only ever
     holds the connection for the duration of a flush, not for its whole
-    lifetime. That's what leaves the dashboard room to read in between.
+    lifetime. That's what leaves the dashboard room to read in between. The
+    connection is opened with retry (get_connection_with_retry) since the
+    dashboard's own short-lived read connection can occasionally win the race
+    for the file lock first.
     """
     partition_lags = measure_lag(consumer)
 
-    db = store.get_connection(db_path)
+    db = store.get_connection_with_retry(db_path)
     try:
         if buffer:
             results, duplicate_count = store.upsert_batch(db, buffer)
         else:
             results, duplicate_count = {}, 0
         store.record_lag(db, time.time(), partition_lags)
+        if prune_before_window_start is not None:
+            store.prune_processed_orders(db, prune_before_window_start)
+        if lag_prune_before is not None:
+            store.prune_consumer_lag(db, lag_prune_before)
     finally:
         db.close()
 
@@ -112,22 +135,48 @@ def run(bootstrap_servers: str, topic: str, group_id: str, from_beginning: bool,
     consumer = make_consumer(bootstrap_servers, group_id, from_beginning)
     consumer.subscribe([topic])
 
-    db = store.get_connection()
+    # get_connection_with_retry, not get_connection: the dashboard could
+    # already be holding the file's read lock the instant this starts up,
+    # same as any other connection this process opens (see flush()).
+    db = store.get_connection_with_retry()
     store.init_schema(db)
     db.close()
 
+    if from_beginning:
+        print(
+            f"note: --from-beginning replays the whole topic, but duplicate-order "
+            f"detection (processed_orders) only retains the last "
+            f"{DEDUP_RETENTION_SECONDS / 3600:.0f}h (see store.prune_processed_orders) "
+            f"-- if this DB already has data older than that, replayed orders from "
+            f"those windows will double-count into window_stats"
+        )
+
     print(f"consuming from '{topic}' as group '{group_id}', flushing every {FLUSH_INTERVAL_SECONDS}s (Ctrl+C to stop)")
     received = 0
+    skipped = 0
     buffer: list[tuple[dict, int]] = []
     last_msg_per_partition: dict[int, object] = {}
     last_flush = time.monotonic()
+    last_prune = time.monotonic()
 
     def do_flush():
-        nonlocal buffer, last_flush
+        nonlocal buffer, last_flush, last_prune
         # Always flush, even with an empty buffer: lag needs to be recorded
         # continuously (e.g. sitting at 0 while idle), not just when there's
         # new data to write, or the dashboard's lag chart would have gaps.
-        flush(store.DEFAULT_DB_PATH, buffer, consumer)
+        prune_before = None
+        lag_prune_before = None
+        if time.monotonic() - last_prune >= PRUNE_INTERVAL_SECONDS:
+            prune_before = window_start_for(time.time() - DEDUP_RETENTION_SECONDS)
+            lag_prune_before = time.time() - LAG_RETENTION_SECONDS
+            last_prune = time.monotonic()
+        flush(
+            store.DEFAULT_DB_PATH,
+            buffer,
+            consumer,
+            prune_before_window_start=prune_before,
+            lag_prune_before=lag_prune_before,
+        )
         if buffer:
             offsets = [
                 TopicPartition(topic, partition, msg.offset() + 1)
@@ -152,20 +201,53 @@ def run(bootstrap_servers: str, topic: str, group_id: str, from_beginning: bool,
                         # even a 100x spike faster than one flush interval
                         # and lag never has a chance to show anything.
                         time.sleep(process_delay_ms / 1000)
-                    order = json.loads(msg.value())
-                    received += 1
-                    window_start = window_start_for(order["timestamp"])
-                    buffer.append((order, window_start))
+                    # Parsing/validating is isolated from everything else in
+                    # this iteration: a single malformed message (bad JSON,
+                    # or missing/wrong-typed fields) must not crash the whole
+                    # consumer. Before this guard existed, an unreadable
+                    # message here would raise uncaught, kill the process,
+                    # and -- since offsets are only committed after a
+                    # successful flush -- get redelivered and crash it again
+                    # on every restart. Log and move on instead.
+                    try:
+                        order = json.loads(msg.value())
+                        window_start = window_start_for(order["timestamp"])
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        skipped += 1
+                        print(f"skipping unreadable message (partition {msg.partition()} offset {msg.offset()}): {e}")
+                    else:
+                        received += 1
+                        buffer.append((order, window_start))
+                    # Advance the commit point for this partition either way
+                    # -- once logged, a skipped message shouldn't be
+                    # redelivered forever.
                     last_msg_per_partition[msg.partition()] = msg
 
             if time.monotonic() - last_flush >= FLUSH_INTERVAL_SECONDS:
-                do_flush()
+                try:
+                    do_flush()
+                except (duckdb.IOException, KafkaException) as e:
+                    # duckdb.IOException: get_connection_with_retry already
+                    # absorbs brief lock contention with the dashboard; this
+                    # only fires if the file was locked longer than that
+                    # retry budget. KafkaException: e.g. commit() failing
+                    # mid-rebalance. Both are transient -- log and try again
+                    # next cycle instead of taking the whole consumer down.
+                    # Safe to retry: upsert_batch is idempotent, and the
+                    # buffer isn't cleared until commit() actually succeeds.
+                    print(f"flush skipped, will retry next cycle: {e}")
     except KeyboardInterrupt:
         print("stopping...")
-        do_flush()
+        try:
+            do_flush()
+        except (duckdb.IOException, KafkaException) as e:
+            print(f"final flush skipped: {e}")
     finally:
         consumer.close()
-        print(f"done, received {received} orders total")
+        summary = f"done, received {received} orders total"
+        if skipped:
+            summary += f", skipped {skipped} unreadable"
+        print(summary)
 
 
 if __name__ == "__main__":

@@ -58,12 +58,32 @@ def run(bootstrap_servers: str, topic: str, profile: SpikeProfile) -> None:
                 last_phase = phase
 
             order = generate_order()
-            producer.produce(
-                topic,
-                key=order["customer_id"],
-                value=json.dumps(order),
-                callback=delivery_report,
-            )
+            payload = json.dumps(order)
+            buffer_full_retries = 0
+            while True:
+                try:
+                    producer.produce(topic, key=order["customer_id"], value=payload, callback=delivery_report)
+                    break
+                except BufferError:
+                    # librdkafka's local send queue is full -- the broker
+                    # can't drain it as fast as we're producing, most likely
+                    # right at a spike's peak. Poll to service pending
+                    # deliveries and free up room, then retry, instead of
+                    # crashing at the exact moment the demo is supposed to
+                    # show the pipeline under load. No retry cap here on
+                    # purpose -- during a legitimate 75x spike hold this can
+                    # take a few seconds to drain and that's fine. But if the
+                    # broker is actually down, this would otherwise retry
+                    # forever in total silence, which just looks like the
+                    # producer quietly stalled. So: keep retrying, but say
+                    # something if it's been stuck a while.
+                    buffer_full_retries += 1
+                    if buffer_full_retries % 30 == 0:
+                        print(
+                            f"warning: send queue still full after {buffer_full_retries * 0.1:.0f}s "
+                            f"straight -- broker may be down or can't keep up"
+                        )
+                    producer.poll(0.1)
             producer.poll(0)
             sent += 1
             if sent % 50 == 0:
@@ -88,6 +108,19 @@ if __name__ == "__main__":
     parser.add_argument("--spike-hold", type=float, default=10.0)
     parser.add_argument("--spike-decay", type=float, default=5.0)
     args = parser.parse_args()
+
+    if args.rate <= 0:
+        parser.error("--rate must be greater than 0")
+    if args.spike:
+        if args.spike_ramp <= 0:
+            parser.error("--spike-ramp must be greater than 0")
+        if args.spike_decay <= 0:
+            parser.error("--spike-decay must be greater than 0")
+        if args.spike_multiplier <= 0:
+            # A multiplier <= 0 drives rate_at() to 0 or negative during the
+            # hold phase, and 1.0 / rate a few lines later in run() would
+            # then divide by zero (or sleep a negative amount).
+            parser.error("--spike-multiplier must be greater than 0")
 
     if args.spike:
         profile = SpikeProfile(

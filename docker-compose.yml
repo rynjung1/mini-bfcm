@@ -17,7 +17,12 @@ services:
     container_name: mini-bfcm-kafka
     hostname: kafka
     ports:
-      - "9092:9092"
+      # Bound to loopback only: Docker's default port publish binds all host
+      # interfaces (0.0.0.0), which would make this broker reachable from
+      # anyone else on the same LAN/wifi, not just this machine. There's no
+      # auth on this listener (PLAINTEXT, local dev only), so restrict it to
+      # localhost explicitly instead.
+      - "127.0.0.1:9092:9092"
     environment:
       # KRaft mode: this broker also acts as the controller (fine for local dev,
       # a real cluster would usually separate these roles across nodes).
@@ -45,6 +50,11 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Default partition count for auto-created topics. Left at the broker's
+      # default of 1, a second consumer group would have nothing to
+      # parallelize across -- multiple partitions are what let separate
+      # consumer processes in the same group each own a slice of the topic.
+      KAFKA_NUM_PARTITIONS: 3
     volumes:
       - kafka-data:/var/lib/kafka/data
 

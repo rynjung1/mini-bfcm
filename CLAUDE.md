@@ -197,7 +197,15 @@ once, that pacing is what makes the explanations land.
 
 ## Roadmap / stretch goals
 
-- Second consumer group, to demonstrate horizontal scaling under load
+- Second consumer group, to demonstrate horizontal scaling under load.
+  **Known constraint to design around**: DuckDB only allows one process to
+  hold the database file at a time, even for a brief write (see
+  `consumer/store.py`). A second consumer process can't simply open its own
+  writer connection to the same file the way it could with a shared
+  database like Postgres — this needs either a single writer process that
+  both consumers hand batches to, or a different storage layer for this
+  stretch goal specifically. Decide the approach before writing the second
+  consumer, not after.
 - Feed spike-period infra cost estimates back in from Ryan's existing
   [finops-platform](https://github.com/rynjung1/finops-platform) project
 - Data quality tests (e.g. dbt or Great Expectations) on the windowed

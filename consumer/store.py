@@ -22,6 +22,7 @@ what leaves the dashboard's read-only connection room to get in
 between flushes.
 """
 
+import time
 from pathlib import Path
 
 import duckdb
@@ -32,6 +33,25 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "mini_bfcm.d
 def get_connection(db_path: Path = DEFAULT_DB_PATH, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(str(db_path), read_only=read_only)
+
+
+def get_connection_with_retry(
+    db_path: Path = DEFAULT_DB_PATH, retries: int = 5, backoff_seconds: float = 0.15
+) -> duckdb.DuckDBPyConnection:
+    """Open a writer connection, retrying briefly if the dashboard currently
+    holds the file's read-only lock. DuckDB allows only one process to touch
+    the file at a time (see module docstring); the dashboard's connections are
+    always short-lived, so a retry almost always succeeds within a couple of
+    attempts -- the same approach dashboard/db.py uses on the read side.
+    """
+    last_error = None
+    for attempt in range(retries):
+        try:
+            return get_connection(db_path)
+        except duckdb.IOException as e:
+            last_error = e
+            time.sleep(backoff_seconds * (attempt + 1))
+    raise last_error
 
 
 def init_schema(conn: duckdb.DuckDBPyConnection) -> None:
@@ -164,6 +184,32 @@ def upsert_batch(conn: duckdb.DuckDBPyConnection, batch: list[tuple[dict, int]])
         conn.execute("ROLLBACK")
         raise
     return results, duplicate_count
+
+
+def prune_processed_orders(conn: duckdb.DuckDBPyConnection, older_than_window_start: int) -> None:
+    """Delete dedup records for windows older than `older_than_window_start`.
+
+    processed_orders exists only to make a Kafka redelivery a no-op; a
+    redelivery can only reference a window recent enough that the consumer
+    might still replay it after a restart, so entries far older than that
+    carry no useful information and would otherwise grow the table forever.
+    """
+    conn.execute("DELETE FROM processed_orders WHERE window_start < ?", [older_than_window_start])
+
+
+def prune_consumer_lag(conn: duckdb.DuckDBPyConnection, older_than: float) -> None:
+    """Delete lag readings recorded before `older_than` (unix timestamp).
+
+    consumer_lag is pure observability telemetry, recorded every flush
+    forever -- unlike window_stats (the actual aggregate output this
+    project produces), there's no reason to keep it indefinitely. Left
+    unpruned, it's the fastest-growing table (one row per partition per
+    flush interval), and the dashboard does a full unfiltered read of it
+    on every poll (see dashboard/db.py) -- so letting it grow forever
+    would make the dashboard progressively slower the longer the pipeline
+    stays up.
+    """
+    conn.execute("DELETE FROM consumer_lag WHERE recorded_at < ?", [older_than])
 
 
 def record_lag(conn: duckdb.DuckDBPyConnection, recorded_at: float, partition_lags: dict[int, int]) -> None:
